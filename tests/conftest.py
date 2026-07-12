@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import pytest
 
+# Known data-plane token for the test session. The gateway now requires a
+# bearer token on the data plane (see glc/security/auth.py); tests set it to
+# a fixed value so the authenticated default client can present it.
+TEST_DATA_PLANE_TOKEN = "test-data-plane-token"
+
 
 @pytest.fixture(autouse=True)
 def _isolated_glc_state(monkeypatch, tmp_path):
@@ -18,6 +23,7 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     monkeypatch.setenv("GLC_AUDIT_DB", str(tmp_path / "audit.sqlite"))
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
     monkeypatch.setenv("GLC_GATEWAY_DB", str(tmp_path / "gateway.sqlite"))
+    monkeypatch.setenv("GLC_DATA_PLANE_TOKEN", TEST_DATA_PLANE_TOKEN)
 
     # Reset singletons that cache config-dir at first access.
     import glc.config as _cfg
@@ -40,13 +46,25 @@ def _isolated_glc_state(monkeypatch, tmp_path):
 
 @pytest.fixture
 def app_client():
-    """TestClient pointed at a freshly-booted glc.main:app."""
+    """TestClient pointed at a freshly-booted glc.main:app.
+
+    The data-plane bearer check (glc/security/auth.py) is bypassed here via a
+    dependency override so existing route-shape/behavior tests don't need to
+    carry a token, and control-plane tests keep their own auth semantics
+    untouched. The real bearer enforcement is covered end-to-end in
+    tests/test_data_plane_auth.py, which uses its own un-overridden client.
+    """
     from fastapi.testclient import TestClient
 
     import glc.main as m
+    from glc.security.auth import require_data_plane_auth
 
-    with TestClient(m.app) as c:
-        yield c
+    m.app.dependency_overrides[require_data_plane_auth] = lambda: None
+    try:
+        with TestClient(m.app) as c:
+            yield c
+    finally:
+        m.app.dependency_overrides.pop(require_data_plane_auth, None)
 
 
 @pytest.fixture

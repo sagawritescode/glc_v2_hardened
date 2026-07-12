@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse
 
 ROOT = Path(__file__).parent
@@ -31,6 +31,7 @@ from glc.routes import control as control_route  # noqa: E402
 from glc.routes import speak as speak_route  # noqa: E402
 from glc.routes import transcribe as transcribe_route  # noqa: E402
 from glc.routing import Router, RouterPool  # noqa: E402
+from glc.security.auth import require_data_plane_auth  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
@@ -73,11 +74,16 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v1 — Gateway for LLMs and Channels", lifespan=lifespan)
+app = FastAPI(title="GLC v2 — Gateway for LLMs and Channels", lifespan=lifespan)
 
-app.include_router(chat_route.router)
-app.include_router(transcribe_route.router)
-app.include_router(speak_route.router)
+# The data plane (chat/batch/vision/embed/speak/transcribe and the read-only
+# listing/status routes) is gated by a bearer token so it never runs for
+# anyone who merely knows the URL. /healthz and /v1/control/* are exempt:
+# healthz must stay public for probes, and control has its own install token.
+_data_plane_auth = [Depends(require_data_plane_auth)]
+app.include_router(chat_route.router, dependencies=_data_plane_auth)
+app.include_router(transcribe_route.router, dependencies=_data_plane_auth)
+app.include_router(speak_route.router, dependencies=_data_plane_auth)
 app.include_router(control_route.router)
 app.include_router(channels_route.router)
 
@@ -86,7 +92,7 @@ app.include_router(channels_route.router)
 async def index() -> str:
     return (
         "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
-        "<h1>GLC v1</h1>"
+        "<h1>GLC v2</h1>"
         "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
         "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
         "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
