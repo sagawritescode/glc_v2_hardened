@@ -24,6 +24,10 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     monkeypatch.setenv("GLC_PAIRING_DB", str(tmp_path / "pairings.sqlite"))
     monkeypatch.setenv("GLC_GATEWAY_DB", str(tmp_path / "gateway.sqlite"))
     monkeypatch.setenv("GLC_DATA_PLANE_TOKEN", TEST_DATA_PLANE_TOKEN)
+    # The generated docs surface is disabled by default in prod (A2). Tests,
+    # however, read /openapi.json (see test_v9_compat.py) to assert the route
+    # shape, so the test session opts docs back in explicitly.
+    monkeypatch.setenv("GLC_ENABLE_DOCS", "1")
 
     # Reset singletons that cache config-dir at first access.
     import glc.config as _cfg
@@ -46,7 +50,11 @@ def _isolated_glc_state(monkeypatch, tmp_path):
 
 @pytest.fixture
 def app_client():
-    """TestClient pointed at a freshly-booted glc.main:app.
+    """TestClient pointed at a freshly-built glc.main app.
+
+    The app is constructed via create_app() so it picks up the per-test
+    environment (config dir, docs flag) rather than the module-level app that
+    was built once at import time.
 
     The data-plane bearer check (glc/security/auth.py) is bypassed here via a
     dependency override so existing route-shape/behavior tests don't need to
@@ -59,12 +67,10 @@ def app_client():
     import glc.main as m
     from glc.security.auth import require_data_plane_auth
 
-    m.app.dependency_overrides[require_data_plane_auth] = lambda: None
-    try:
-        with TestClient(m.app) as c:
-            yield c
-    finally:
-        m.app.dependency_overrides.pop(require_data_plane_auth, None)
+    app = m.create_app()
+    app.dependency_overrides[require_data_plane_auth] = lambda: None
+    with TestClient(app) as c:
+        yield c
 
 
 @pytest.fixture

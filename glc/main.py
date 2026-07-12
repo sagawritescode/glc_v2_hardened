@@ -35,6 +35,23 @@ from glc.security.auth import require_data_plane_auth  # noqa: E402
 
 PORT = int(os.getenv("GLC_PORT", "8111"))
 
+# Truthy values that enable the generated OpenAPI docs surface. Anything else
+# (including the variable being unset) keeps docs disabled.
+_DOCS_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def docs_enabled() -> bool:
+    """Whether the generated OpenAPI/Swagger/ReDoc surface is exposed.
+
+    A2 (info disclosure): the auto-generated docs routes (/docs, /redoc,
+    /openapi.json) publish the full route map, provider order, models, and
+    rate limits to anyone who knows the URL. They are disabled by default and
+    only enabled when GLC_ENABLE_DOCS is explicitly truthy, so production is
+    secure-by-default (the Modal deploy simply never sets the flag) while
+    local dev and the test suite can opt in.
+    """
+    return os.getenv("GLC_ENABLE_DOCS", "").strip().lower() in _DOCS_TRUTHY
+
 
 def _install_sighup_reload() -> None:
     """Hot-reload policy.yaml on SIGHUP. Windows lacks SIGHUP so this is
@@ -74,38 +91,62 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="GLC v2 — Gateway for LLMs and Channels", lifespan=lifespan)
+def create_app() -> FastAPI:
+    """Build a fresh FastAPI app.
 
-# The data plane (chat/batch/vision/embed/speak/transcribe and the read-only
-# listing/status routes) is gated by a bearer token so it never runs for
-# anyone who merely knows the URL. /healthz and /v1/control/* are exempt:
-# healthz must stay public for probes, and control has its own install token.
-_data_plane_auth = [Depends(require_data_plane_auth)]
-app.include_router(chat_route.router, dependencies=_data_plane_auth)
-app.include_router(transcribe_route.router, dependencies=_data_plane_auth)
-app.include_router(speak_route.router, dependencies=_data_plane_auth)
-app.include_router(control_route.router)
-app.include_router(channels_route.router)
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return (
-        "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
-        "<h1>GLC v2</h1>"
-        "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
-        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>"
-        "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
-        " V9 callers should point at this port unchanged: chat, vision, embed,"
-        " batch, cost-by-agent, providers, capabilities, status, calls."
-        "</p>"
-        "</body></html>"
+    A factory (rather than a single module-level app) keeps the docs-exposure
+    decision testable: each test environment can construct an app with docs on
+    or off without cross-test state pollution. modal_app.py and uvicorn still
+    import the module-level `app` built from this factory below.
+    """
+    # A2: disable the generated docs surface unless explicitly enabled. Passing
+    # None for these URLs makes /docs, /redoc, and /openapi.json return 404.
+    show_docs = docs_enabled()
+    fastapi_app = FastAPI(
+        title="GLC v2 — Gateway for LLMs and Channels",
+        lifespan=lifespan,
+        docs_url="/docs" if show_docs else None,
+        redoc_url="/redoc" if show_docs else None,
+        openapi_url="/openapi.json" if show_docs else None,
     )
 
+    # The data plane (chat/batch/vision/embed/speak/transcribe and the read-only
+    # listing/status routes) is gated by a bearer token so it never runs for
+    # anyone who merely knows the URL. /healthz and /v1/control/* are exempt:
+    # healthz must stay public for probes, and control has its own install token.
+    data_plane_auth = [Depends(require_data_plane_auth)]
+    fastapi_app.include_router(chat_route.router, dependencies=data_plane_auth)
+    fastapi_app.include_router(transcribe_route.router, dependencies=data_plane_auth)
+    fastapi_app.include_router(speak_route.router, dependencies=data_plane_auth)
+    fastapi_app.include_router(control_route.router)
+    fastapi_app.include_router(channels_route.router)
 
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True, "port": PORT}
+    docs_hint = (
+        "<p>Open <code>/docs</code> for the OpenAPI explorer.</p>" if show_docs else ""
+    )
+
+    @fastapi_app.get("/", response_class=HTMLResponse)
+    async def index() -> str:
+        return (
+            "<html><body style='font-family:sans-serif;max-width:680px;margin:2em auto'>"
+            "<h1>GLC v2</h1>"
+            "<p>Gateway for LLMs and Channels — Session 11 scaffold.</p>"
+            f"{docs_hint}"
+            "<p>Channel adapters connect over <code>WS /v1/channels/&lt;name&gt;</code>."
+            " V9 callers should point at this port unchanged: chat, vision, embed,"
+            " batch, cost-by-agent, providers, capabilities, status, calls."
+            "</p>"
+            "</body></html>"
+        )
+
+    @fastapi_app.get("/healthz")
+    async def healthz():
+        return {"ok": True, "port": PORT}
+
+    return fastapi_app
+
+
+app = create_app()
 
 
 if __name__ == "__main__":
