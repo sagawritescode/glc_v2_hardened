@@ -81,11 +81,32 @@ async def lifespan(app: FastAPI):
     get_or_create_install_token()
     _install_sighup_reload()
     app.state.cache = GeminiCache(ttl_seconds=300)
-    app.state.providers = P.build_providers(app.state.cache)
-    app.state.router = Router(app.state.providers, chat_route.ORDER)
-    app.state.router_providers = P.build_router_providers()
-    app.state.router_pool = RouterPool(app.state.router_providers, chat_route.ROUTER_ORDER)
-    app.state.embedders, app.state.embed_order = E.build_embedders()
+    providers = P.build_providers(app.state.cache)
+    router_providers = P.build_router_providers()
+    embedders, embed_order = E.build_embedders()
+
+    # A3 (egress wall): when an egress client is present (set by the Modal
+    # deploy wrapper, or injected by a test), relocate every provider/embedder
+    # network call into a domain-allowlisted Sandbox. The router, retry loop,
+    # DB logging, and rate-state all stay here in the Function unchanged — only
+    # the outbound HTTP moves behind the wall. When no client is set (plain
+    # local dev / the existing test suite), behavior is exactly as before.
+    egress_client = getattr(app.state, "egress_client", None)
+    if egress_client is not None:
+        from glc.egress.remote_providers import wrap_for_egress
+
+        providers, router_providers, embedders = wrap_for_egress(
+            providers=providers,
+            router_providers=router_providers,
+            embedders=embedders,
+            client=egress_client,
+        )
+
+    app.state.providers = providers
+    app.state.router = Router(providers, chat_route.ORDER)
+    app.state.router_providers = router_providers
+    app.state.router_pool = RouterPool(router_providers, chat_route.ROUTER_ORDER)
+    app.state.embedders, app.state.embed_order = embedders, embed_order
     app.state.started_at = time.time()
     app.state.registered_channels = []
     yield

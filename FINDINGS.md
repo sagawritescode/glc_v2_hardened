@@ -122,3 +122,94 @@ GLC_ENABLE_DOCS=1 uvicorn glc.main:app  # /docs, /redoc, /openapi.json → 200
 
 Automated coverage lives in
 [tests/test_info_disclosure.py](tests/test_info_disclosure.py).
+
+## A3 — Single Function = no egress wall
+
+**Severity:** critical (exfiltration / SSRF / cost & data abuse)
+
+**Finding.** The gateway ran as one Modal Function with unrestricted outbound
+network access. A `/v1/chat` error revealed the Function could reach
+`googleapis.com`; it could just as easily reach `attacker.example.com`. There
+was no egress allowlist, so a prompt-injection / SSRF / compromised-dependency
+path could exfiltrate data or call arbitrary hosts.
+
+**Invariant broken.** Egress is restricted to declared provider domains —
+untrusted / outbound provider calls must not be able to reach arbitrary hosts.
+
+**Fix.**
+- Declared a minimal provider allowlist in
+  [glc/egress/allowlist.py](glc/egress/allowlist.py):
+  `generativelanguage.googleapis.com`, `api.groq.com`, `api.cerebras.ai`,
+  `integrate.api.nvidia.com`, `openrouter.ai`, `models.github.ai`,
+  `api.cartesia.ai`, `api.elevenlabs.io`. Exact hostnames only (no `*.`
+  wildcards). Dynamic / request-time hosts (user image URLs, webhook targets,
+  channel APIs, local Ollama) are deliberately excluded.
+- Kept the public FastAPI ASGI app in the Modal Function (auth, validation,
+  routing, rate state, DB logging). Relocated the *network* calls into a Modal
+  Sandbox created with
+  `modal.Sandbox.create(outbound_domain_allowlist=PROVIDER_EGRESS_ALLOWLIST)`.
+- Function↔Sandbox boundary:
+  [glc/egress/sandbox_client.py](glc/egress/sandbox_client.py) ships a JSON
+  command; [glc/egress/worker.py](glc/egress/worker.py) runs inside the
+  Sandbox and executes `egress_probe` / `chat` / `embed` / `speak` /
+  `transcribe`.
+- Chat/embed use drop-in proxies
+  ([glc/egress/remote_providers.py](glc/egress/remote_providers.py)) so
+  `Router` / failover / retries stay unchanged. Speak/transcribe send
+  network-backed prefers through the Sandbox and keep local prefers
+  (kokoro, system_fallback, whisper.cpp) in-process.
+- [modal_app.py](modal_app.py) injects the egress client into `app.state` at
+  deploy time and reuses the same image + `glc-llm-keys` secret (not the
+  data-plane auth secret). Scale-to-zero is unchanged (`min_containers=0`).
+
+**Reproduce (before → after).**
+
+Local automated coverage (no live Modal network required):
+
+```bash
+GLC_CONFIG_DIR="$PWD/.pytest_glc" GLC_DATA_PLANE_TOKEN=boot-token \
+  GLC_ENABLE_DOCS=1 uv run pytest \
+  tests/test_egress_allowlist.py \
+  tests/test_egress_providers.py \
+  tests/test_egress_voice.py -q
+rm -rf .pytest_glc
+```
+
+These assert the allowlist is passed to `Sandbox.create`, that chat/embed/
+speak/transcribe route through the client when the wall is on, and that
+local voice prefers skip the Sandbox.
+
+Live Modal verification (the network wall itself; CI cannot enforce this):
+
+```bash
+# Against a deployed app / Modal shell: probe a non-provider domain from the
+# Sandbox-side worker path. Before A3 the Function could reach it; after A3
+# Modal blocks the TLS connection and the worker returns ok=false.
+# Example shape (run from a container that has the egress client wired):
+python - <<'PY'
+from modal_app import build_sandbox_egress_client
+c = build_sandbox_egress_client()
+print(c.egress_probe("https://example.com"))
+# => {"ok": false, "error_type": "ConnectError", ...}   # blocked
+print(c.egress_probe("https://api.groq.com"))
+# => {"ok": true, "status": ...} or an HTTP response from the host  # allowed
+PY
+
+# Legitimate gateway call still reaches a provider domain (mock keys):
+curl -i -X POST "$URL/v1/chat" \
+  -H "Authorization: Bearer $GLC_DATA_PLANE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"hi"}],"provider":"gemini"}'
+# => provider result or provider auth error for the *allowlisted* host —
+#    never a successful call to an arbitrary non-provider domain
+```
+
+**Residual limitations (documented, out of A3's provider wall).**
+- `_resolve_image_urls` in [glc/routes/chat.py](glc/routes/chat.py) can still
+  fetch caller-supplied `http(s)` image URLs from the Function. That is a
+  separate SSRF surface and is intentionally not on the provider allowlist.
+- Channel / webhook outbound hosts remain outside this wall until given their
+  own explicit, separately reviewed policy.
+- Incremental SSE token streaming across the Sandbox boundary is deferred;
+  streaming chat currently returns the full text as one chunk while keeping
+  the SSE response envelope.
