@@ -213,3 +213,79 @@ curl -i -X POST "$URL/v1/chat" \
 - Incremental SSE token streaming across the Sandbox boundary is deferred;
   streaming chat currently returns the full text as one chunk while keeping
   the SSE response envelope.
+
+## A4 — One Secret for the whole Function (leak 1, not closed)
+
+**Severity:** critical (silent key theft)
+
+**Finding.** Provider API keys lived in `os.environ` of the public Modal
+Function because [modal_app.py](modal_app.py) mounted `glc-llm-keys`
+(`llm_secret`) on the Function alongside the data-plane auth secret. A3 moved
+outbound provider HTTP into an allowlisted Sandbox and already passed
+`secrets=[llm_secret]` into that Sandbox — but left the same Secret on the
+Function. Any in-process code (hostile channel adapter, poisoned dependency,
+agent-run / RCE) could still steal every provider key with
+`os.environ["GEMINI_API_KEY"]` (Section 2 theft). Move 1 (wrap the monolith)
+did not close the leak.
+
+**Invariant broken.** Provider API keys must not appear in the public
+Function’s environment. They belong only where provider network calls run
+(the A3 Sandbox). The data-plane bearer token may stay on the Function (A1).
+
+**Fix.**
+- Named the provider secret env vars in
+  [glc/egress/provider_secrets.py](glc/egress/provider_secrets.py)
+  (`PROVIDER_SECRET_ENV_VARS`: `GEMINI_API_KEY`, `NVIDIA_API_KEY`,
+  `GROQ_API_KEY`, `CEREBRAS_API_KEY`, `OPEN_ROUTER_API_KEY`,
+  `GITHUB_ACCESS_TOKEN`, `CARTESIA_API_KEY`, `ELEVENLABS_API_KEY`).
+- Added keyless Function-side catalogs in
+  [glc/egress/catalog.py](glc/egress/catalog.py)
+  (`build_egress_provider_catalog`, `build_egress_router_catalog`,
+  `build_egress_embedder_catalog`) so lifespan can register metadata
+  (name / model / capabilities / embed rate state) without reading keys.
+- [glc/main.py](glc/main.py) lifespan: when `egress_client` is set, use those
+  catalogs then `wrap_for_egress`; without egress (local/dev), keep
+  `build_providers` / `build_embedders` from env.
+- [modal_app.py](modal_app.py): public Function mounts
+  `FUNCTION_SECRETS = [auth_secret]` only. Sandbox mounts
+  `SANDBOX_SECRETS = [llm_secret]` via `build_sandbox_egress_client()`.
+  Real provider objects with real keys are still built inside
+  [glc/egress/worker.py](glc/egress/worker.py).
+
+**Reproduce (before → after).**
+
+Local automated coverage:
+
+```bash
+GLC_CONFIG_DIR="$PWD/.pytest_glc" GLC_DATA_PLANE_TOKEN=boot-token \
+  GLC_ENABLE_DOCS=1 uv run pytest tests/test_secret_isolation.py -q
+rm -rf .pytest_glc
+```
+
+These assert the secret name set, keyless catalogs, Section 2 probe empty
+when egress is on with no provider keys in env, chat/embed still route through
+the egress client, and Function vs Sandbox Modal secret wiring
+(`llm_secret` not in `FUNCTION_SECRETS`, present in `SANDBOX_SECRETS`).
+
+Section 2 theft probe (Function process / any in-process code):
+
+```python
+import os
+from glc.egress.provider_secrets import PROVIDER_SECRET_ENV_VARS
+stolen = {k: os.environ[k][:4] + "…" for k in PROVIDER_SECRET_ENV_VARS if k in os.environ}
+print(stolen)
+# Before A4 (Function mounted glc-llm-keys): non-empty → theft succeeds
+# After A4: {} → theft fails on the Function path
+```
+
+Live Modal note: after redeploy, the same probe inside the public Function
+container must be empty; the Sandbox worker process (which mounts
+`glc-llm-keys`) still has the keys and can call providers.
+
+**Residual limitations (documented, out of A4).**
+- Channel / webhook / OAuth secrets are a separate surface; A4 only isolates
+  provider API keys listed in `PROVIDER_SECRET_ENV_VARS`.
+- In-process Function code can still *invoke* the Sandbox (cost abuse), but
+  cannot read provider keys from Function `os.environ`.
+- Local `.env` via `load_dotenv` in [glc/main.py](glc/main.py) can still put
+  keys in a non-Modal process; the hardened path is the Modal deploy.

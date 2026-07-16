@@ -81,26 +81,34 @@ async def lifespan(app: FastAPI):
     get_or_create_install_token()
     _install_sighup_reload()
     app.state.cache = GeminiCache(ttl_seconds=300)
-    providers = P.build_providers(app.state.cache)
-    router_providers = P.build_router_providers()
-    embedders, embed_order = E.build_embedders()
 
-    # A3 (egress wall): when an egress client is present (set by the Modal
-    # deploy wrapper, or injected by a test), relocate every provider/embedder
-    # network call into a domain-allowlisted Sandbox. The router, retry loop,
-    # DB logging, and rate-state all stay here in the Function unchanged — only
-    # the outbound HTTP moves behind the wall. When no client is set (plain
-    # local dev / the existing test suite), behavior is exactly as before.
+    # A3 (egress wall) + A4 (secret isolation): when an egress client is present
+    # (Modal deploy or a test), build keyless metadata catalogs and wrap them so
+    # network calls run in the Sandbox — the Function never needs provider keys
+    # in its env. Without a client (local/dev / existing tests), keep the
+    # in-process builders that read keys from the environment.
     egress_client = getattr(app.state, "egress_client", None)
     if egress_client is not None:
+        from glc.egress.catalog import (
+            build_egress_embedder_catalog,
+            build_egress_provider_catalog,
+            build_egress_router_catalog,
+        )
         from glc.egress.remote_providers import wrap_for_egress
 
+        providers = build_egress_provider_catalog()
+        router_providers = build_egress_router_catalog()
+        embedders, embed_order = build_egress_embedder_catalog()
         providers, router_providers, embedders = wrap_for_egress(
             providers=providers,
             router_providers=router_providers,
             embedders=embedders,
             client=egress_client,
         )
+    else:
+        providers = P.build_providers(app.state.cache)
+        router_providers = P.build_router_providers()
+        embedders, embed_order = E.build_embedders()
 
     app.state.providers = providers
     app.state.router = Router(providers, chat_route.ORDER)
