@@ -45,6 +45,10 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     import glc.audit.store as _a
 
     _a._singleton = None
+    # A6: volume sync hooks are process-global; clear so a prior test's
+    # register_volume_sync cannot leak into the next.
+    _a._volume_commit = None
+    _a._volume_reload = None
     yield
 
 

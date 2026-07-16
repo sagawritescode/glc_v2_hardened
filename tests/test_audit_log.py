@@ -1,10 +1,17 @@
 """Append-only audit log — write correctness, restart survival,
-no-update/no-delete surface."""
+no-update/no-delete surface, and A6 Volume sync hooks."""
 
 from __future__ import annotations
 
 from glc.audit import store
-from glc.audit.store import AuditStore, append, init_store, query, schema_version
+from glc.audit.store import (
+    AuditStore,
+    append,
+    init_store,
+    query,
+    register_volume_sync,
+    schema_version,
+)
 
 
 def test_init_then_append():
@@ -72,3 +79,86 @@ def test_jsonifies_complex_params():
     )
     rows = query(limit=1)
     assert "nested" in rows[0]["params_json"]
+
+
+# ── A6: optional Volume commit/reload hooks ─────────────────────────────────
+
+
+def test_volume_sync_noop_without_registration():
+    """Local/dev path: no hooks registered → append still works."""
+    assert store._volume_commit is None
+    assert store._volume_reload is None
+    init_store()
+    rid = append(
+        channel="x",
+        channel_user_id="1",
+        trust_level="owner_paired",
+        event_type="noop",
+    )
+    assert rid > 0
+    assert len(query(limit=5)) == 1
+
+
+def test_volume_sync_reload_on_init_and_query():
+    events: list[str] = []
+
+    def commit() -> None:
+        events.append("commit")
+
+    def reload() -> None:
+        events.append("reload")
+
+    register_volume_sync(commit=commit, reload=reload)
+    events.clear()
+    init_store()
+    assert events == ["reload"]
+
+    events.clear()
+    query(limit=1)
+    assert events == ["reload"]
+
+
+def test_volume_sync_commit_after_append():
+    """Append must reload before open and commit after the connection closes."""
+    events: list[str] = []
+
+    def commit() -> None:
+        events.append("commit")
+
+    def reload() -> None:
+        events.append("reload")
+
+    register_volume_sync(commit=commit, reload=reload)
+    init_store()
+    store._singleton = None
+    events.clear()
+
+    rid = append(
+        channel="x",
+        channel_user_id="1",
+        trust_level="owner_paired",
+        event_type="inbound_message",
+    )
+    assert rid > 0
+    # get_store → init_store (reload) then AuditStore.append (reload, commit)
+    assert events == ["reload", "reload", "commit"]
+    assert events[-1] == "commit"
+
+
+def test_volume_sync_query_does_not_commit():
+    events: list[str] = []
+
+    def commit() -> None:
+        events.append("commit")
+
+    def reload() -> None:
+        events.append("reload")
+
+    register_volume_sync(commit=commit, reload=reload)
+    init_store()
+    append(channel="x", channel_user_id="1", trust_level="owner_paired", event_type="x")
+    events.clear()
+    rows = query(limit=10)
+    assert len(rows) == 1
+    assert events == ["reload"]
+    assert "commit" not in events

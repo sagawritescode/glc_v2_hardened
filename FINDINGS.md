@@ -289,3 +289,75 @@ container must be empty; the Sandbox worker process (which mounts
   cannot read provider keys from Function `os.environ`.
 - Local `.env` via `load_dotenv` in [glc/main.py](glc/main.py) can still put
   keys in a non-Modal process; the hardened path is the Modal deploy.
+
+## A6 — Audit db on a Volume with min_containers=0 + autoscale
+
+**Severity:** high (corrupted / split audit trail)
+
+**Finding.** The append-only audit log is SQLite
+([glc/audit/store.py](glc/audit/store.py)). On Modal the public Function mounts
+`data_volume` at `/data` and sets `min_containers=0` (scale to zero) with no
+upper bound, so under load Modal can run **multiple containers at once**.
+SQLite does not support concurrent writers safely on a shared filesystem: two
+containers appending to the same `audit.sqlite` can corrupt the DB or produce a
+**split audit trail** (each container sees different rows). Separately,
+`GLC_AUDIT_DB` was unset while only `GLC_CONFIG_DIR=/data/glc` was set, so
+audit defaulted to `~/.glc/audit.sqlite` — ephemeral per container — and
+Volume writes were never synced with `Volume.commit()` / `Volume.reload()`, so
+even a single-writer assumption could lose visibility across restarts.
+
+**Invariant broken.** Invariant 7 — append-only audit trail integrity: every
+action is logged, the trail is replayable, and it survives restarts. A
+split or corrupted log silently breaks that guarantee.
+
+**Fix.**
+- Set `GLC_AUDIT_DB=/data/glc/audit.sqlite` on the deploy image so the audit
+  path is explicitly Volume-backed (`AUDIT_DB_PATH` in
+  [modal_app.py](modal_app.py)).
+- Cap the Function at `max_containers=MAX_CONTAINERS` with `MAX_CONTAINERS = 1`
+  so only one process can open the SQLite writer under autoscale.
+  (`min_containers=1` alone is not enough — Modal can still scale up.)
+- Added optional Volume sync hooks in [glc/audit/store.py](glc/audit/store.py)
+  (`register_volume_sync`): `reload()` before any SQLite open,
+  `commit()` after append once the connection is closed. Modal’s
+  `fastapi_app` registers `data_volume.commit` / `data_volume.reload` at
+  startup. Local/dev and tests leave hooks unset (no-op).
+
+**Tradeoff.** The gateway Function no longer horizontally scales past one
+container. That is acceptable for coursework / free tier; a dedicated audit
+writer Function or a server DB would be needed to scale writers later.
+
+**Reproduce (before → after).**
+
+Local automated coverage:
+
+```bash
+GLC_CONFIG_DIR="$PWD/.pytest_glc" GLC_DATA_PLANE_TOKEN=boot-token \
+  GLC_ENABLE_DOCS=1 uv run pytest tests/test_audit_log.py \
+  tests/test_audit_modal_wiring.py -q
+rm -rf .pytest_glc
+```
+
+These assert Volume sync hook order (reload before open, commit after append,
+query does not commit), no-op without registration, and Modal wiring
+(`AUDIT_DB_PATH` under `/data/glc`, `MAX_CONTAINERS == 1`, A4 secrets
+unchanged, `register_volume_sync` in `fastapi_app`).
+
+Live Modal (after redeploy):
+
+```bash
+# Before: parallel channel WS/webhook traffic while Modal ran 2+ containers
+# could leave missing/split rows or a malformed audit.sqlite; audit may also
+# have lived under ~/.glc/ and vanished on scale-to-zero.
+#
+# After: max_containers=1 + GLC_AUDIT_DB on the Volume + commit/reload —
+# hammer the same endpoints, then scale to zero and cold-start; row count
+# matches events and prior rows are still visible at /data/glc/audit.sqlite.
+```
+
+**Residual limitations (documented, out of A6).**
+- The gateway call ledger ([glc/db.py](glc/db.py)) and pairing store
+  ([glc/security/pairing.py](glc/security/pairing.py)) are the same class of
+  SQLite-on-Volume risk under autoscale; A6 scopes to audit only.
+- `max_containers=1` serializes all gateway traffic through one container;
+  horizontal scale requires a different audit backend or a dedicated writer.

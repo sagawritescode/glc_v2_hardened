@@ -6,12 +6,22 @@ from glc.egress.allowlist import PROVIDER_EGRESS_ALLOWLIST
 
 app = modal.App("glc-v2-gateway")
 
+# A6: audit SQLite must live on the Volume (not ~/.glc ephemeral), and only
+# one container may write it — SQLite cannot safely share a Volume across
+# concurrent writers. Named constants so tests can assert without digging into
+# Modal decorator internals.
+AUDIT_DB_PATH = "/data/glc/audit.sqlite"
+MAX_CONTAINERS = 1
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("fastapi>=0.110", "uvicorn[standard]>=0.27", "httpx>=0.27",
                  "python-dotenv>=1.0", "pydantic>=2.6", "jsonschema>=4.21",
                  "pyyaml>=6.0", "websockets>=12.0")
-    .env({"GLC_CONFIG_DIR": "/data/glc"})            # databases land on the Volume
+    .env({
+        "GLC_CONFIG_DIR": "/data/glc",
+        "GLC_AUDIT_DB": AUDIT_DB_PATH,  # A6: explicit Volume-backed audit path
+    })
     # copy=True bakes glc into an Image layer so A3 Sandboxes (same Image) can
     # `import glc`. Default copy=False only mounts for the Function at startup,
     # which is why the worker hit ModuleNotFoundError: No module named 'glc'.
@@ -54,13 +64,26 @@ def build_sandbox_egress_client():
     )
 
 
-@app.function(image=image, volumes={"/data": data_volume},
-              secrets=FUNCTION_SECRETS, min_containers=0)  # A4: no llm_secret; scale to zero
+@app.function(
+    image=image,
+    volumes={"/data": data_volume},
+    secrets=FUNCTION_SECRETS,  # A4: no llm_secret
+    min_containers=0,  # scale to zero when idle
+    max_containers=MAX_CONTAINERS,  # A6: single SQLite writer on the Volume
+)
 @modal.asgi_app()
 def fastapi_app():
     import os
+
     os.makedirs("/data/glc", exist_ok=True)
-    from glc.main import app as web    # the unchanged glc_v1 app
+    # A6: Volume writes are not visible across containers/restarts until
+    # commit/reload. Register before any audit open so init/append see the
+    # committed trail after scale-to-zero.
+    from glc.audit.store import register_volume_sync
+
+    register_volume_sync(commit=data_volume.commit, reload=data_volume.reload)
+
+    from glc.main import app as web  # the unchanged glc_v1 app
     # A3: route all provider egress through a domain-allowlisted Sandbox.
     # A4: that Sandbox is the only place that receives glc-llm-keys.
     # The lifespan builds keyless catalogs and wraps providers/embedders.

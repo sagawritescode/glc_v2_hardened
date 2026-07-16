@@ -17,9 +17,37 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 DEFAULT_DIR = Path(os.path.expanduser("~/.glc"))
+
+# Optional Modal Volume sync (A6). Registered by modal_app at startup; no-op
+# locally and in tests. reload() must run with no SQLite file open; commit()
+# runs after the connection is closed.
+_volume_commit: Callable[[], None] | None = None
+_volume_reload: Callable[[], None] | None = None
+
+
+def register_volume_sync(
+    *,
+    commit: Callable[[], None],
+    reload: Callable[[], None],
+) -> None:
+    """Wire Modal Volume commit/reload for cross-container persistence."""
+    global _volume_commit, _volume_reload
+    _volume_commit = commit
+    _volume_reload = reload
+
+
+def _sync_reload() -> None:
+    if _volume_reload is not None:
+        _volume_reload()
+
+
+def _sync_commit() -> None:
+    if _volume_commit is not None:
+        _volume_commit()
 
 
 def _resolve_path() -> str:
@@ -44,6 +72,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def init_store() -> None:
+    _sync_reload()
     with _conn() as c:
         c.executescript(_SCHEMA_PATH.read_text())
 
@@ -77,6 +106,7 @@ class AuditStore:
         params: Any = None,
         result: Any = None,
     ) -> int:
+        _sync_reload()
         with _conn() as c:
             cur = c.execute(
                 """INSERT INTO audit_log
@@ -96,7 +126,9 @@ class AuditStore:
                     _jsonify(result),
                 ),
             )
-            return int(cur.lastrowid or 0)
+            row_id = int(cur.lastrowid or 0)
+        _sync_commit()
+        return row_id
 
 
 _singleton: AuditStore | None = None
@@ -127,11 +159,13 @@ def query(limit: int = 100, session_id: str | None = None, channel: str | None =
         q += " WHERE " + " AND ".join(where)
     q += " ORDER BY ts DESC LIMIT ?"
     args.append(limit)
+    _sync_reload()
     with _conn() as c:
         return [dict(r) for r in c.execute(q, args).fetchall()]
 
 
 def schema_version() -> int:
+    _sync_reload()
     with _conn() as c:
         row = c.execute("SELECT MAX(version) AS v FROM audit_schema").fetchone()
         return int(row["v"] or 0)
