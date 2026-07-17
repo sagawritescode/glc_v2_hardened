@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import modal
 
@@ -15,11 +15,13 @@ _BASE_IMAGE = (
 )
 _UV_VERSION = "0.8.14"
 
-# A6: audit SQLite must live on the Volume (not ~/.glc ephemeral), and only
-# one container may write it — SQLite cannot safely share a Volume across
-# concurrent writers. Named constants so tests can assert without digging into
-# Modal decorator internals.
-AUDIT_DB_PATH = "/data/glc/audit.sqlite"
+# B2: audit SQLite lives on a dedicated Volume that the public gateway never
+# mounts. The writer serializes access because SQLite plus Volume reload/commit
+# is unsafe with concurrent inputs or containers.
+AUDIT_VOLUME_MOUNT = "/audit"
+AUDIT_DB_PATH = f"{AUDIT_VOLUME_MOUNT}/glc/audit.sqlite"
+AUDIT_WRITER_MAX_CONTAINERS = 1
+AUDIT_WRITER_MAX_INPUTS = 1
 MAX_CONTAINERS = 1
 
 image = (
@@ -27,7 +29,6 @@ image = (
     .uv_sync(uv_project_dir=".", frozen=True, uv_version=_UV_VERSION)
     .env({
         "GLC_CONFIG_DIR": "/data/glc",
-        "GLC_AUDIT_DB": AUDIT_DB_PATH,  # A6: explicit Volume-backed audit path
     })
     # copy=True bakes glc into an Image layer so A3 Sandboxes (same Image) can
     # `import glc`. Default copy=False only mounts for the Function at startup,
@@ -35,6 +36,15 @@ image = (
     .add_local_dir(str(Path(__file__).parent / "glc"), remote_path="/root/glc", copy=True)
 )
 data_volume = modal.Volume.from_name("glc-data", create_if_missing=True)
+audit_volume = modal.Volume.from_name("glc-audit", create_if_missing=True)
+
+# Named mappings keep the security boundary reviewable and are used directly
+# by the decorators below. No public gateway or egress Sandbox receives the
+# audit mapping.
+VolumeMounts = dict[str | PurePosixPath, modal.Volume | modal.CloudBucketMount]
+GATEWAY_VOLUMES: VolumeMounts = {"/data": data_volume}
+AUDIT_WRITER_VOLUMES: VolumeMounts = {AUDIT_VOLUME_MOUNT: audit_volume}
+
 # A4: provider API keys (GEMINI_API_KEY, …) live ONLY on the Sandbox below.
 # The public Function must not mount this Secret — otherwise any in-process
 # code can steal keys via os.environ (Section 2 theft).
@@ -49,6 +59,58 @@ auth_secret = modal.Secret.from_name("glc-gateway-auth")
 # Modal decorator internals. Function = auth only; Sandbox = provider keys.
 FUNCTION_SECRETS = [auth_secret]
 SANDBOX_SECRETS = [llm_secret]
+
+
+@app.cls(
+    image=image,
+    env={"GLC_AUDIT_DB": AUDIT_DB_PATH},
+    volumes=AUDIT_WRITER_VOLUMES,
+    max_containers=AUDIT_WRITER_MAX_CONTAINERS,
+)
+@modal.concurrent(max_inputs=AUDIT_WRITER_MAX_INPUTS)
+class AuditWriter:
+    """Trusted, serialized owner of the audit SQLite file.
+
+    Only schema initialization and validated append are remotely callable.
+    Volume synchronization and filesystem access stay inside this container.
+    """
+
+    @modal.enter()
+    def _configure(self) -> None:
+        from glc.audit.store import get_store, register_volume_sync
+
+        register_volume_sync(commit=audit_volume.commit, reload=audit_volume.reload)
+        # Ensure every fresh writer container has a committed schema before an
+        # append can reload the Volume. get_store() also primes the singleton.
+        get_store()
+        audit_volume.commit()
+
+    @modal.method()
+    def initialize(self) -> None:
+        from glc.audit.store import init_store
+
+        init_store()
+        audit_volume.commit()
+
+    @modal.method()
+    def append(self, event: dict) -> int:
+        from glc.audit.store import append as append_audit
+
+        # Validation runs again here, inside the trusted boundary.
+        return append_audit(**event)
+
+
+audit_writer = AuditWriter()
+
+
+def initialize_remote_audit() -> None:
+    """Narrow gateway-side callback registered with the audit facade."""
+    audit_writer.initialize.remote()
+
+
+def append_remote_audit(event: dict) -> int:
+    """Synchronously append or raise; never degrade to local persistence."""
+    return audit_writer.append.remote(event)
 
 
 def build_sandbox_egress_client():
@@ -73,22 +135,25 @@ def build_sandbox_egress_client():
 
 @app.function(
     image=image,
-    volumes={"/data": data_volume},
+    volumes=GATEWAY_VOLUMES,
     secrets=FUNCTION_SECRETS,  # A4: no llm_secret
     min_containers=0,  # scale to zero when idle
-    max_containers=MAX_CONTAINERS,  # A6: single SQLite writer on the Volume
+    max_containers=MAX_CONTAINERS,
 )
 @modal.asgi_app()
 def fastapi_app():
     import os
 
     os.makedirs("/data/glc", exist_ok=True)
-    # A6: Volume writes are not visible across containers/restarts until
-    # commit/reload. Register before any audit open so init/append see the
-    # committed trail after scale-to-zero.
-    from glc.audit.store import register_volume_sync
+    # B2: production audit operations cross the writer boundary synchronously.
+    # Any failure propagates into startup/request handling; there is no local
+    # SQLite fallback in the public Function.
+    from glc.audit.store import register_remote_backend
 
-    register_volume_sync(commit=data_volume.commit, reload=data_volume.reload)
+    register_remote_backend(
+        initialize=initialize_remote_audit,
+        append=append_remote_audit,
+    )
 
     from glc.main import app as web  # the unchanged glc_v1 app
     # A3: route all provider egress through a domain-allowlisted Sandbox.

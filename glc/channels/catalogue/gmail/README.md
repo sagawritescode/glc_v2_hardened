@@ -182,12 +182,12 @@ The Gmail `users.watch()` registration publishes `{emailAddress, historyId}` not
 | `user_paired` | Explicitly paired contacts | Read-only tools |
 | `untrusted` | Everyone else | Policy-restricted, minimal actions |
 
-Trust is resolved from `~/.glc/pairings.sqlite`. The owner is registered on server startup via:
-```python
-store.force_pair_owner("gmail", "owner@gmail.com", user_handle="owner")
+Trust is resolved from `~/.glc/pairings.sqlite`. Bootstrap the first owner before starting the server:
+```bash
+uv run python scripts/bootstrap_owner.py gmail owner@gmail.com --handle owner
 ```
 
-Or configure via environment variable:
+Then configure the runtime server to use that identity:
 ```bash
 export GLC_GMAIL_OWNER="your-email@gmail.com"
 ```

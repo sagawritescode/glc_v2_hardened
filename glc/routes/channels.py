@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from glc.audit import append as audit_append
 from glc.channels import registry
 from glc.channels.envelope import ChannelMessage, ChannelReply
-from glc.config import get_or_create_install_token
+from glc.config import verify_install_token
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.rate_limits import get_rate_limiter
@@ -40,8 +40,7 @@ async def channel_ws(websocket: WebSocket, name: str, token: str | None = Query(
         presented = header_auth.removeprefix("Bearer ").strip()
     elif token:
         presented = token
-    expected = get_or_create_install_token()
-    if presented != expected:
+    if not verify_install_token(presented):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 

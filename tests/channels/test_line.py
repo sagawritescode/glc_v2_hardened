@@ -16,6 +16,7 @@ import pytest
 from glc.channels.catalogue.line.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.line_mock import OWNER_ID, STRANGER_ID, LineMock
 
 
@@ -27,7 +28,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("line", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "line", OWNER_ID)
     yield
     store.revoke("line", OWNER_ID)
 

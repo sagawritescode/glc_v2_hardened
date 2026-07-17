@@ -16,6 +16,7 @@ import pytest
 from glc.channels.catalogue.signal.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.signal_mock import (
     GROUP_ID_B64,
     OWNER_ID,
@@ -32,7 +33,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("signal", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "signal", OWNER_ID)
     yield
     store.revoke("signal", OWNER_ID)
 

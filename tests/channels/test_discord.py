@@ -16,6 +16,7 @@ import pytest
 from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.discord_mock import OWNER_ID, STRANGER_ID, DiscordMock
 
 
@@ -27,7 +28,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("discord", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "discord", OWNER_ID)
     yield
     store.revoke("discord", OWNER_ID)
 

@@ -49,6 +49,17 @@ def _isolated_glc_state(monkeypatch, tmp_path):
     # register_volume_sync cannot leak into the next.
     _a._volume_commit = None
     _a._volume_reload = None
+    # B2: production's remote writer callbacks are also process-global.
+    # Tests default to the local SQLite backend unless they opt in explicitly.
+    _a._remote_initialize = None
+    _a._remote_append = None
+
+    # B4: bootstrap a digest-only install token for this isolated config dir.
+    # The raw value is kept only in the env for fixtures/adapters — never on disk.
+    from scripts.bootstrap_install_token import create_install_token
+
+    raw_install_token = create_install_token()
+    monkeypatch.setenv("GLC_INSTALL_TOKEN", raw_install_token)
     yield
 
 
@@ -78,8 +89,8 @@ def app_client():
 
 
 @pytest.fixture
-def install_token(app_client):
-    """Returns the per-installation token created during boot."""
-    from glc.config import install_token_path
+def install_token():
+    """Returns the per-installation token from the test env (not from disk)."""
+    import os
 
-    return install_token_path().read_text().strip()
+    return os.environ["GLC_INSTALL_TOKEN"]

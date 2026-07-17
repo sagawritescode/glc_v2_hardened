@@ -6,6 +6,10 @@ Per-pairing trust levels live in ~/.glc/pairings.sqlite: owner_paired for
 the installation owner, user_paired for explicitly-paired users.
 
 The pairing store is sqlite-backed so it survives restarts.
+
+First-owner bootstrap (seeding the initial owner_paired identity) lives in
+``scripts/bootstrap_owner.py`` — an installer-only path excluded from the
+gateway image. This runtime store does not expose a direct owner-create helper.
 """
 
 from __future__ import annotations
@@ -83,7 +87,13 @@ class PairingStore:
         user_handle: str = "",
         *,
         requested_trust_level: str = "user_paired",
+        install_token: str | None = None,
     ) -> tuple[str, float]:
+        if requested_trust_level == "owner_paired":
+            from glc.config import verify_install_token
+
+            if not verify_install_token(install_token):
+                raise PermissionError("owner pairing requires the installation token")
         code = f"{secrets.randbelow(1_000_000):06d}"
         expires_at = time.time() + CODE_TTL_SECONDS
         with _conn() as c:
@@ -183,28 +193,6 @@ class PairingStore:
                 (channel, channel_user_id),
             )
             return cur.rowcount > 0
-
-    def force_pair_owner(
-        self, channel: str, channel_user_id: str, user_handle: str = "owner"
-    ) -> PairingRecord:
-        """Out-of-band pairing for the installation owner. Used by the
-        installer to bootstrap the first owner identity. Not exposed
-        through HTTP."""
-        paired_at = time.time()
-        with _conn() as c:
-            c.execute(
-                """INSERT OR REPLACE INTO pairings
-                   (channel, channel_user_id, user_handle, trust_level, paired_at)
-                   VALUES (?,?,?,?,?)""",
-                (channel, channel_user_id, user_handle, "owner_paired", paired_at),
-            )
-        return PairingRecord(
-            channel=channel,
-            channel_user_id=channel_user_id,
-            user_handle=user_handle,
-            trust_level="owner_paired",
-            paired_at=paired_at,
-        )
 
 
 _singleton: PairingStore | None = None

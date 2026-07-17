@@ -84,9 +84,9 @@ async def gateway_roundtrip(
     """
     import websockets
 
-    from glc.config import get_or_create_install_token
+    from glc.config import require_install_token_from_env
 
-    token = token or get_or_create_install_token()
+    token = token or require_install_token_from_env()
     uri = f"ws://{host}:{port}/v1/channels/{envelope.channel}"
     async with websockets.connect(uri, additional_headers={"Authorization": f"Bearer {token}"}) as ws:
         await ws.send(envelope.model_dump_json())

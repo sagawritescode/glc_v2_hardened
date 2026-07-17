@@ -31,6 +31,7 @@ audit.sqlite
 pairings.sqlite
 gateway.sqlite
 install_token
+install_token.hash
 
 # Old generator artifacts
 /tmp/

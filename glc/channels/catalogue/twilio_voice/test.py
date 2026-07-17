@@ -32,6 +32,7 @@ from tests.channels.mocks.twilio_voice_mock import (
     STREAM_SID,
     TwilioVoiceMock,
 )
+from tests.pairing_helpers import confirm_owner
 
 ADAPTER_LOGGER = "glc.channels.catalogue.twilio_voice.adapter"
 
@@ -66,7 +67,7 @@ def mock():
 
 @pytest.fixture
 def owner_paired():
-    get_pairing_store().force_pair_owner("twilio_voice", OWNER_ID, user_handle="owner")
+    confirm_owner(get_pairing_store(), "twilio_voice", OWNER_ID)
     return OWNER_ID
 
 

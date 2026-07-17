@@ -13,10 +13,8 @@ Subcommands
 -----------
 
 ``owner <user_id> [--handle NAME]``
-    Pair a user as the installation owner directly. Equivalent to
-    ``PairingStore.force_pair_owner``. Use this for the demo + tests
-    where you want trust_level=owner_paired without going through the
-    six-digit code dance.
+    Bootstrap the channel's first installation owner through the
+    installer-only path. Refuses when a Teams owner already exists.
 
 ``invite <user_id> [--handle NAME] [--trust user_paired]``
     Issue a six-digit pairing code. The operator (or the user) then
@@ -64,6 +62,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from glc.security.pairing import PairingRecord, get_pairing_store
+from scripts.bootstrap_owner import bootstrap_owner
 
 CHANNEL = "teams"
 
@@ -83,9 +82,12 @@ def _filter_teams(pairings: list[PairingRecord]) -> list[PairingRecord]:
 
 
 def cmd_owner(args: argparse.Namespace) -> int:
-    """Pair a user as ``owner_paired`` directly."""
-    store = get_pairing_store()
-    rec = store.force_pair_owner(CHANNEL, args.user_id, user_handle=args.handle or "owner")
+    """Bootstrap the first ``owner_paired`` identity."""
+    try:
+        rec = bootstrap_owner(CHANNEL, args.user_id, user_handle=args.handle or "owner")
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     print(f"Paired {rec.channel_user_id!r} as owner_paired on channel {CHANNEL!r}.")
     _print_record(rec)
     return 0
@@ -93,8 +95,8 @@ def cmd_owner(args: argparse.Namespace) -> int:
 
 def cmd_invite(args: argparse.Namespace) -> int:
     """Issue a six-digit pairing code; operator runs ``confirm`` to finish."""
-    if args.trust not in {"user_paired", "owner_paired"}:
-        print(f"error: --trust must be 'user_paired' or 'owner_paired', got {args.trust!r}", file=sys.stderr)
+    if args.trust != "user_paired":
+        print("error: this CLI only issues user_paired codes; use the token-protected control API for owners", file=sys.stderr)
         return 2
     store = get_pairing_store()
     code, expires_at = store.issue_code(
@@ -172,7 +174,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
-    p_owner = subparsers.add_parser("owner", help="pair a user as owner_paired (direct, no code)")
+    p_owner = subparsers.add_parser("owner", help="bootstrap the first owner_paired identity")
     p_owner.add_argument("user_id", help='Teams from.id value, e.g. "29:42"')
     p_owner.add_argument("--handle", help="optional display handle", default=None)
     p_owner.set_defaults(func=cmd_owner)
@@ -182,9 +184,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_invite.add_argument("--handle", help="optional display handle", default=None)
     p_invite.add_argument(
         "--trust",
-        choices=("user_paired", "owner_paired"),
+        choices=("user_paired",),
         default="user_paired",
-        help="requested trust level (default: user_paired)",
+        help="requested trust level (user_paired only)",
     )
     p_invite.set_defaults(func=cmd_invite)
 

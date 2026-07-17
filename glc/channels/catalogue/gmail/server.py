@@ -204,10 +204,15 @@ def main():
     OWNER_EMAIL = os.environ.get("GLC_GMAIL_OWNER")
     store = get_pairing_store()
     if OWNER_EMAIL:
-        store.force_pair_owner("gmail", OWNER_EMAIL, user_handle="owner")
-        print(section("[+]", "Owner Paired"))
-        print(field("email", OWNER_EMAIL, GREEN))
-        print(field("trust", "owner_paired", GREEN))
+        owner = store.lookup("gmail", OWNER_EMAIL)
+        if owner is not None and owner.trust_level == "owner_paired":
+            print(section("[+]", "Owner Paired"))
+            print(field("email", OWNER_EMAIL, GREEN))
+            print(field("trust", "owner_paired", GREEN))
+        else:
+            print(section("[!]", "Owner not bootstrapped"))
+            print(field("run", f"uv run python scripts/bootstrap_owner.py gmail {OWNER_EMAIL}", YELLOW))
+            print(field("note", "Sender will remain untrusted until setup is completed", DIM))
     else:
         print(section("[!]", "No owner paired"))
         print(field("set", "export GLC_GMAIL_OWNER=you@gmail.com", YELLOW))

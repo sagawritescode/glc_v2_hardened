@@ -3,9 +3,13 @@ no-update/no-delete surface, and A6 Volume sync hooks."""
 
 from __future__ import annotations
 
+import pytest
+
 from glc.audit import store
 from glc.audit.store import (
+    MAX_PAYLOAD_BYTES,
     AuditStore,
+    AuditValidationError,
     append,
     init_store,
     query,
@@ -41,11 +45,9 @@ def test_write_survives_restart(monkeypatch, tmp_path):
 
 def test_store_exposes_no_update_or_delete():
     s = AuditStore()
-    assert not hasattr(s, "update")
-    assert not hasattr(s, "delete")
     public = [n for n in dir(s) if not n.startswith("_")]
-    assert "append" in public
-    assert len([n for n in public if n in ("update", "delete", "modify")]) == 0
+    assert public == ["append"]
+    assert not {"update", "delete", "drop", "modify", "execute", "sql"} & set(public)
 
 
 def test_schema_version_is_one():
@@ -79,6 +81,56 @@ def test_jsonifies_complex_params():
     )
     rows = query(limit=1)
     assert "nested" in rows[0]["params_json"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("channel", ""),
+        ("channel_user_id", "  "),
+        ("trust_level", None),
+        ("event_type", 123),
+        ("session_id", ""),
+    ],
+)
+def test_rejects_invalid_event_fields(field, value):
+    event = {
+        "channel": "x",
+        "channel_user_id": "1",
+        "trust_level": "owner_paired",
+        "event_type": "inbound_message",
+    }
+    event[field] = value
+
+    with pytest.raises(AuditValidationError):
+        append(**event)
+
+
+def test_field_limits_count_utf8_bytes():
+    with pytest.raises(AuditValidationError, match="channel exceeds"):
+        append(
+            channel="é" * 65,  # 130 UTF-8 bytes; channel limit is 128.
+            channel_user_id="1",
+            trust_level="owner_paired",
+            event_type="inbound_message",
+        )
+
+
+@pytest.mark.parametrize("payload_field", ["params", "result"])
+def test_rejects_oversized_payload_without_persisting(payload_field):
+    init_store()
+    event = {
+        "channel": "x",
+        "channel_user_id": "1",
+        "trust_level": "owner_paired",
+        "event_type": "inbound_message",
+        payload_field: "x" * (MAX_PAYLOAD_BYTES + 1),
+    }
+
+    with pytest.raises(AuditValidationError, match=payload_field):
+        append(**event)
+
+    assert query(limit=1) == []
 
 
 # ── A6: optional Volume commit/reload hooks ─────────────────────────────────

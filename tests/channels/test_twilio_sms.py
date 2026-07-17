@@ -16,6 +16,7 @@ import pytest
 from glc.channels.catalogue.twilio_sms.adapter import Adapter
 from glc.channels.envelope import Attachment, ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.twilio_sms_mock import OWNER_ID, STRANGER_ID, TwilioSmsMock
 
 
@@ -27,7 +28,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("twilio_sms", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "twilio_sms", OWNER_ID)
     yield
     store.revoke("twilio_sms", OWNER_ID)
 

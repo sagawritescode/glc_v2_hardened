@@ -218,6 +218,13 @@ curl -i -X POST "$URL/v1/chat" \
 
 **Severity:** critical (silent key theft)
 
+**B1 status — resolved.** The earlier B1 observation (“the environment holds
+all keys”) described the deployment before this A4 fix. The current Modal
+wiring gives the public Function only `auth_secret`; provider credentials in
+`llm_secret` are mounted only in the egress Sandbox. In-process gateway code
+can still read the data-plane bearer token and invoke the Sandbox, but it can
+no longer read the provider API keys from the Function's `os.environ`.
+
 **Finding.** Provider API keys lived in `os.environ` of the public Modal
 Function because [modal_app.py](modal_app.py) mounted `glc-llm-keys`
 (`llm_secret`) on the Function alongside the data-plane auth secret. A3 moved
@@ -361,3 +368,246 @@ Live Modal (after redeploy):
   SQLite-on-Volume risk under autoscale; A6 scopes to audit only.
 - `max_containers=1` serializes all gateway traffic through one container;
   horizontal scale requires a different audit backend or a dedicated writer.
+
+## B2 — Public gateway and adapters could rewrite the audit database
+
+**Severity:** high (audit-history destruction / anti-forensics)
+
+**Status:** partially mitigated; not a complete security-domain separation
+
+**Finding.** The Python audit API exposed only `append()`, but that was an
+application convention rather than a storage control. The public Modal Function
+mounted the Volume containing `/data/glc/audit.sqlite` and set
+`GLC_AUDIT_DB` to that path. Any code running in the gateway process could
+bypass [glc/audit/store.py](glc/audit/store.py), open the SQLite file directly,
+and issue `UPDATE`, `DELETE`, or `DROP` statements (or unlink the file).
+
+Adapters are explicitly part of this threat model. External adapters should
+never receive the audit Volume. More importantly, webhook adapters are loaded
+and instantiated inside the public gateway by
+[glc/channels/registry.py](glc/channels/registry.py) and
+[glc/routes/channels.py](glc/routes/channels.py), so a compromised in-process
+adapter inherited every filesystem mount available to that Function. Moving
+the audit file to a persistent Volume in A6 fixed restart/concurrent-writer
+correctness, but did not stop this operating-system-layer access.
+
+Before B2, code in the public Function could destroy the trail directly:
+
+```python
+import sqlite3
+
+sqlite3.connect("/data/glc/audit.sqlite").execute("DELETE FROM audit_log")
+```
+
+The equivalent local-development path defaults to `~/.glc/audit.sqlite`.
+
+**Invariant broken.** Invariant 7 — append-only audit trail integrity. Code
+being audited must not also have unrestricted filesystem/SQL authority to
+rewrite its own evidence.
+
+**Fix.**
+- [modal_app.py](modal_app.py) now defines a separate `glc-audit` Volume,
+  mounted at `/audit` only on a serialized `AuditWriter` Modal Class. The
+  public FastAPI Function keeps the unrelated `glc-data` mount for gateway
+  configuration but no longer receives the audit Volume or `GLC_AUDIT_DB`.
+- The writer's remotely callable surface is exactly `initialize` and `append`.
+  It exposes no arbitrary SQL, update, delete, drop, query, or filesystem
+  operation. It is limited to one container and one concurrent input, and it
+  owns Volume reload/commit synchronization.
+- Production startup registers narrow synchronous callbacks through
+  `register_remote_backend()` in [glc/audit/store.py](glc/audit/store.py).
+  `init_store()` and `append()` then call the writer and never silently fall
+  back to a gateway-local SQLite file.
+- Local development and unit tests retain the SQLite backend. Production
+  remote mode deliberately disables local `query()`/`schema_version()` rather
+  than accidentally creating a second audit database.
+- Events are validated before remote submission and again inside the writer.
+  Required identity/event fields must be non-empty strings and are bounded to
+  128 UTF-8 bytes (`channel`, `trust_level`, `event_type`) or 512 bytes
+  (`channel_user_id`). Optional string fields are bounded to 512 bytes.
+  Serialized `params` and `result` are limited to 64 KiB each; oversized data
+  is rejected, not truncated.
+
+**Failure behavior.** Audit initialization and append calls are synchronous.
+Writer/Volume failure aborts application startup or propagates before the
+channel reply/adapter send, so required security-relevant processing fails
+closed instead of continuing with a missing event. This trades availability
+for audit completeness. A response lost after a successful commit remains
+ambiguous: a caller retry can create a duplicate because schema v1 has no
+idempotency/event key.
+
+**Reproduce / verify.**
+
+```bash
+uv run pytest tests/test_audit_log.py tests/test_audit_modal_wiring.py \
+  tests/test_audit_remote.py tests/test_secret_isolation.py \
+  tests/test_egress_allowlist.py -q
+```
+
+The tests verify local SQLite continuity, field/payload validation, no local
+fallback in remote mode, propagation of writer failures before adapter send,
+the writer's narrow method set, the actual gateway/writer decorator mounts,
+and unchanged A3 egress/A4 secret wiring. In particular, the public Function
+spec contains only `/data`, while only `AuditWriter` receives
+`AUDIT_WRITER_VOLUMES`.
+
+**Residual limitation — B2 is not fully closed in one Modal security domain.**
+The repository proves declarative mount separation, but it contains no Modal
+workspace role/ACL policy proving that the public Function's runtime identity
+cannot resolve `glc-audit`. The gateway already uses that identity to create
+Modal Sandboxes dynamically for A3. If the same identity is permitted to call
+`Volume.from_name("glc-audit")` and launch another Function/Sandbox with that
+Volume mounted, compromised in-process code can regain filesystem access.
+This must be checked with a controlled live permission probe in the deployed
+workspace; static tests cannot establish the answer.
+
+If that lookup/mount is allowed, this change is only a partial mitigation.
+Full isolation requires the writer and Volume to live in a separately
+permissioned Modal environment/account, or an external audit service whose
+gateway credential grants append-only access. Hash chaining may add tamper
+evidence, but does not close this boundary by itself: an attacker with complete
+SQLite write access can rebuild or truncate an unanchored chain. A trustworthy
+chain head/checkpoint must be stored outside the attacker's security domain.
+Local SQLite remains intentionally writable by the local process, and trusted
+writer code/operators still retain administrative storage authority.
+
+## B3 — Gateway runtime could force-create an owner
+
+**Severity:** high (in-process privilege escalation)
+
+**Status:** application API fixed; storage and install-token risks remain
+
+**Finding.** `PairingStore.force_pair_owner()` was part of
+[glc/security/pairing.py](glc/security/pairing.py), which is imported by the
+live gateway and its in-process channel adapters. Any code executing in that
+process could call the method and immediately insert an `owner_paired` record
+without an installation token, pairing code, or confirmation.
+
+Removing that one method was not sufficient by itself. The same runtime store
+also accepted `requested_trust_level="owner_paired"` through `issue_code()`,
+after which in-process code could call `confirm_code()` directly. Route-level
+authentication did not protect direct Python calls to the store.
+
+**Invariant broken.** First-owner bootstrap must be an installer operation.
+The live gateway must neither contain a direct owner writer nor allow owner
+pairing to be initiated without the installation token.
+
+**Fix.**
+- Removed `force_pair_owner()` from `PairingStore` and from the
+  [glc/security](glc/security) export surface.
+- Moved the direct first-owner writer to
+  [scripts/bootstrap_owner.py](scripts/bootstrap_owner.py). It creates only
+  the first owner for a channel and refuses if one already exists.
+- Kept the installer writer outside the `glc` package. The Modal image installs
+  only the `glc` wheel and copies only the `glc/` directory, so the public
+  gateway image does not contain this script.
+- `PairingStore.issue_code()` now requires the installation token when
+  `owner_paired` is requested. [glc/routes/control.py](glc/routes/control.py)
+  passes the already-validated bearer token; normal token-protected owner and
+  user pairing continue to work.
+- Removed runtime startup owner writes from Gmail, Twilio SMS, and Telegram.
+  These processes now verify pre-existing owners and print the trusted setup
+  command. Telegram no longer assigns ownership to the first sender.
+- Updated setup utilities, development harnesses, documentation, and tests.
+
+For a local installation, bootstrap the first owner before starting the
+gateway:
+
+```bash
+uv run python scripts/bootstrap_owner.py telegram 123456789 --handle owner
+```
+
+For an already-deployed gateway, the operator may retain the existing
+token-protected `/v1/control/pair` and `/v1/control/pair/confirm` flow.
+
+**Reproduce / verify.**
+
+```bash
+uv run pytest tests/test_owner_bootstrap.py tests/test_pairing.py \
+  tests/test_control_plane.py -q
+```
+
+The tests prove that the runtime store has no force-owner method, owner code
+issuance fails without the install token, the installer writer is excluded
+from the gateway image/import graph, first-owner bootstrap refuses a second
+owner, and token-protected owner pairing remains functional.
+
+**Residual risks.**
+- The pairing SQLite database is also on storage writable by the gateway.
+  Compromised in-process code can bypass Python APIs and issue SQL directly.
+- Therefore this fix removes the unauthenticated runtime capability and the
+  first-sender takeover, but does not create a complete security-domain
+  boundary. Full isolation requires pairing writes and token custody in a
+  separately permissioned service or Modal environment that the gateway
+  identity cannot mount, resolve, or invoke administratively.
+
+## B4 — Install token readable from in-process code
+
+**Severity:** high (control-plane credential theft)
+
+**Status:** application API fixed; residual storage-domain risks remain
+
+**Finding.** `get_or_create_install_token()` in
+[glc/config.py](glc/config.py) generated a `secrets.token_urlsafe(32)` once
+and persisted the **plaintext** to `$GLC_CONFIG_DIR/install_token` (on Modal,
+`/data/glc/install_token`). Any code running inside the gateway process could
+read that file or call the helper and obtain the control-plane / WebSocket
+credential — then mint owner pairings, connect as any adapter, or enumerate
+presence.
+
+**Invariant broken.** The live gateway must be able to *verify* a presented
+install token without being able to *recover* the original secret. Token
+creation and display are installer operations, not request-handling APIs.
+
+**Fix.**
+- Runtime stores only a SHA-256 digest at
+  `$GLC_CONFIG_DIR/install_token.hash`. Verification uses
+  `hmac.compare_digest` over digests ([glc/config.py](glc/config.py)
+  `verify_install_token`).
+- Removed `get_or_create_install_token()` and any runtime API that returns the
+  raw token. Lifespan calls `ensure_install_token_configured()` (fails closed
+  if no digest is present).
+- Create / rotate lives in
+  [scripts/bootstrap_install_token.py](scripts/bootstrap_install_token.py)
+  (outside the `glc` package; not copied into the Modal image). `uv run glc
+  token [--rotate]` delegates to that script when available.
+- Adapters and bridges read the raw secret from `GLC_INSTALL_TOKEN` via
+  `require_install_token_from_env()` — never from the digest file.
+- Legacy plaintext `install_token` files are migrated to a digest and deleted
+  on first verify/configure.
+- Control-plane and channel WebSocket auth continue to accept
+  `Authorization: Bearer <token>` (or `?token=` for WS).
+
+Bootstrap (local):
+
+```bash
+uv run python scripts/bootstrap_install_token.py
+export GLC_INSTALL_TOKEN='<printed-once-value>'
+uv run glc serve
+```
+
+**Reproduce / verify.**
+
+```bash
+uv run pytest tests/test_install_token.py tests/test_control_plane.py \
+  tests/test_owner_bootstrap.py tests/test_pairing.py -q
+```
+
+The install-token tests prove the digest file never contains the raw secret,
+runtime has no raw-token getter, verification is constant-time, legacy
+plaintext migrates away, the installer writer is excluded from the gateway
+image, and the control plane still accepts a valid bearer.
+
+**Residual risks.**
+- Compromised in-process code that can *call* the installer script (or delete
+  the digest and coerce an operator re-bootstrap) can still learn a *new*
+  token. B4 closes recovery of the *existing* secret from runtime storage.
+- If `GLC_INSTALL_TOKEN` is set in the gateway process environment (not only
+  in out-of-process adapters), in-process code can read it from `os.environ`.
+  Keep that env var on adapter hosts, not on the Modal Function, when possible.
+- Overwriting `install_token.hash` on the writable data Volume can lock out
+  legitimate operators (availability), analogous to other Volume integrity
+  risks (B2).
+- Full isolation still requires token verification (and pairing writes) in a
+  separately permissioned service that the gateway identity cannot
+  administratively remount or rewrite.

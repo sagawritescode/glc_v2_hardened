@@ -5,6 +5,7 @@ from __future__ import annotations
 from glc.security.allowlists import allowed
 from glc.security.pairing import get_pairing_store
 from glc.security.trust_level import classify
+from tests.pairing_helpers import confirm_owner
 
 # Default channels.yaml ships every channel except webui as
 # `enabled: false` — this is a security default for fresh installs.
@@ -60,7 +61,7 @@ def test_trust_level_unknown_is_untrusted():
 
 
 def test_trust_level_owner_paired():
-    get_pairing_store().force_pair_owner("matrix", "owner-1", "owner")
+    confirm_owner(get_pairing_store(), "matrix", "owner-1")
     assert classify("matrix", "owner-1") == "owner_paired"
 
 

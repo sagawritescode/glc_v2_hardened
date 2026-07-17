@@ -136,9 +136,8 @@ LINE adapter end-to-end harness  —  mode=capture  owner=Uowner_harness
   `stub_agent`. The adapter under test is unchanged in both cases.
 - **Isolated trust store.** The harness points `GLC_PAIRING_DB` at a throwaway
   temp file and resets the pairing-store singleton, so it never reads or writes
-  the real `~/.glc/pairings.sqlite`. It seeds the owner with
-  `get_pairing_store().force_pair_owner("line", owner_id)` — the same path the
-  `pair_owner` fixture in the test suite uses — and leaves the stranger id
+  the real `~/.glc/pairings.sqlite`. It seeds the temporary database through
+  `scripts.bootstrap_owner.bootstrap_owner()` and leaves the stranger id
   unpaired so it classifies as `untrusted`.
 
 ## Live mode prerequisites

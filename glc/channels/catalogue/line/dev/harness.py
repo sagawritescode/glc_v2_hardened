@@ -50,6 +50,7 @@ from glc.channels.catalogue.line.dev.live_bridge import (
 )
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security import pairing
+from scripts.bootstrap_owner import bootstrap_owner
 
 CAPTURE_SECRET = "harness-capture-secret"  # not a credential; signs synthetic offline webhooks
 STRANGER_ID = "Ustranger_harness"
@@ -395,7 +396,7 @@ async def _amain(args: argparse.Namespace) -> int:
         # Isolate trust lookups in a throwaway DB; never touch ~/.glc/pairings.sqlite.
         os.environ["GLC_PAIRING_DB"] = os.path.join(tmp, "pairings.sqlite")
         pairing._singleton = None
-        pairing.get_pairing_store().force_pair_owner("line", owner_id, user_handle="owner")
+        bootstrap_owner("line", owner_id, user_handle="owner")
 
         ctx = Ctx(mode=mode, config=config, secret=secret, owner_id=owner_id)
         names = (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from glc.security.pairing import CODE_TTL_SECONDS, PairingStore
+from tests.pairing_helpers import confirm_owner
 
 
 def test_issue_code_is_six_digits():
@@ -39,7 +40,7 @@ def test_unknown_code_returns_none():
 
 def test_owner_paired_classification():
     store = PairingStore()
-    rec = store.force_pair_owner("webui", "owner-1")
+    rec = confirm_owner(store, "webui", "owner-1")
     assert rec.trust_level == "owner_paired"
     found = store.lookup("webui", "owner-1")
     assert found is not None
@@ -48,7 +49,7 @@ def test_owner_paired_classification():
 
 def test_owners_only_returns_owner_paired():
     store = PairingStore()
-    store.force_pair_owner("telegram", "owner-1")
+    confirm_owner(store, "telegram", "owner-1")
     code, _ = store.issue_code("telegram", "user-1", requested_trust_level="user_paired")
     store.confirm_code(code)
     owners = store.owners(channel="telegram")
@@ -58,7 +59,7 @@ def test_owners_only_returns_owner_paired():
 
 def test_revoke_removes_pairing():
     store = PairingStore()
-    store.force_pair_owner("matrix", "owner-1")
+    confirm_owner(store, "matrix", "owner-1")
     assert store.revoke("matrix", "owner-1") is True
     assert store.lookup("matrix", "owner-1") is None
 

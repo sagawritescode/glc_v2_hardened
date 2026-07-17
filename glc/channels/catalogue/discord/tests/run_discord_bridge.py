@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 from glc.channels.catalogue.discord.adapter import Adapter
 from glc.channels.envelope import ChannelReply
-from glc.config import get_or_create_install_token
+from glc.config import require_install_token_from_env
 
 # Load environment variables from .env at repository root
 load_dotenv(Path(__file__).resolve().parents[5] / ".env")
@@ -116,7 +116,7 @@ async def run_bridge():
         return
 
     # 1. Retrieve the GLC local install token to authorize with the GLC gateway
-    install_token = get_or_create_install_token()
+    install_token = require_install_token_from_env()
     glc_port = os.environ.get("GLC_PORT", "8111")
     glc_ws_url = f"ws://localhost:{glc_port}/v1/channels/discord?token={install_token}"
 

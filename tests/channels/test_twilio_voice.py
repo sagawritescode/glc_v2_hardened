@@ -18,6 +18,7 @@ import pytest
 from glc.channels.catalogue.twilio_voice.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.twilio_voice_mock import (
     OWNER_ID,
     STRANGER_ID,
@@ -33,7 +34,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("twilio_voice", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "twilio_voice", OWNER_ID)
     yield
     store.revoke("twilio_voice", OWNER_ID)
 

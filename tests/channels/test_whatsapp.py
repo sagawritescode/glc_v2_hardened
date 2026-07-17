@@ -19,6 +19,7 @@ import pytest
 from glc.channels.catalogue.whatsapp.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.whatsapp_mock import (
     DEFAULT_APP_SECRET,
     OWNER_ID,
@@ -35,7 +36,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("whatsapp", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "whatsapp", OWNER_ID)
     yield
     store.revoke("whatsapp", OWNER_ID)
 

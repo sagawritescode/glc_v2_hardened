@@ -14,7 +14,7 @@ Run:
 
 Env:
     TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER   (adapter + signing)
-    TWILIO_OWNER_NUMBER      your mobile, paired as owner (owner_paired)
+    TWILIO_OWNER_NUMBER      your pre-bootstrapped owner mobile number
     GLC_PUBLIC_BASE          the ngrok https URL (serves /artifacts for outbound MMS)
     GLC_TWILIO_WEBHOOK_PORT  receiver port (default 8200)
     GLC_GATEWAY_HOST/PORT    gateway location (default localhost:8111)
@@ -134,11 +134,19 @@ def main() -> None:
     print(f"  {BOLD}{WHITE}GLC v1 — Twilio SMS/MMS Adapter{RESET}  {DIM}Live WebSocket demo{RESET}")
     print(_rule())
 
-    # ── Pair the owner so inbound is classified owner_paired ──
+    # Owner creation is installer-only; this runtime server only verifies it.
     if cfg["owner_number"]:
-        get_pairing_store().force_pair_owner("twilio_sms", cfg["owner_number"], user_handle="owner")
-        _field("owner", cfg["owner_number"], GREEN)
-        _field("trust", "owner_paired", GREEN)
+        owner = get_pairing_store().lookup("twilio_sms", cfg["owner_number"])
+        if owner is not None and owner.trust_level == "owner_paired":
+            _field("owner", cfg["owner_number"], GREEN)
+            _field("trust", "owner_paired", GREEN)
+        else:
+            _field("owner", cfg["owner_number"], YELLOW)
+            _field(
+                "setup",
+                f"uv run python scripts/bootstrap_owner.py twilio_sms {cfg['owner_number']}",
+                YELLOW,
+            )
     else:
         _field("owner", "TWILIO_OWNER_NUMBER unset — senders will be untrusted", YELLOW)
 

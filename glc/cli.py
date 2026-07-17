@@ -16,7 +16,15 @@ def main() -> int:
     p_serve.add_argument("--port", type=int, default=int(os.getenv("GLC_PORT", "8111")))
     p_serve.add_argument("--reload", action="store_true")
 
-    sub.add_parser("token", help="print the per-installation control token")
+    p_token = sub.add_parser(
+        "token",
+        help="create/rotate the install token via the installer script (prints once)",
+    )
+    p_token.add_argument(
+        "--rotate",
+        action="store_true",
+        help="replace an existing token (invalidates the previous value)",
+    )
     sub.add_parser("channels", help="list channels discovered in the catalogue")
 
     args = parser.parse_args()
@@ -27,10 +35,20 @@ def main() -> int:
         uvicorn.run("glc.main:app", host=args.host, port=args.port, reload=args.reload)
         return 0
     if args.cmd == "token":
-        from glc.config import get_or_create_install_token
-
-        print(get_or_create_install_token())
-        return 0
+        # Installer-only path: delegate to scripts/ so the gateway package never
+        # exposes a raw-token getter. scripts/ is not in the Modal image.
+        try:
+            from scripts.bootstrap_install_token import main as token_main
+        except ImportError:
+            print(
+                "error: install-token bootstrap is not available in this install. "
+                "From a source checkout run:\n"
+                "  uv run python scripts/bootstrap_install_token.py"
+                + (" --rotate" if args.rotate else ""),
+                file=sys.stderr,
+            )
+            return 1
+        return token_main(["--rotate"] if args.rotate else [])
     if args.cmd == "channels":
         from glc.channels.registry import discover
 

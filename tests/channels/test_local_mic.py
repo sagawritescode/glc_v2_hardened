@@ -21,6 +21,7 @@ import pytest
 from glc.channels.catalogue.local_mic.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from glc.voice.stt.base import STTProvider, TranscribeResult
 from glc.voice.stt.router import register_test_provider as register_stt
 from glc.voice.tts.base import SynthesizeResult, TTSProvider
@@ -75,7 +76,7 @@ def _voice_providers():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("local_mic", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "local_mic", OWNER_ID)
     yield
     store.revoke("local_mic", OWNER_ID)
 

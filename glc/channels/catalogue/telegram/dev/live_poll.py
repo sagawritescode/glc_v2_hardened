@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 
 from glc.channels.catalogue.telegram.adapter import Adapter
 from glc.channels.envelope import ChannelReply
-from glc.config import get_or_create_install_token
+from glc.config import require_install_token_from_env
 from glc.security.pairing import get_pairing_store
 
 load_dotenv()
@@ -35,19 +35,25 @@ async def main() -> None:
 
     print("Telegram Live Polling Bridge Starting...")
 
-    # 1. Ask for owner chat ID or read it from env to pair automatically
+    # 1. Verify the owner was bootstrapped out of band.
     owner_id = os.getenv("TELEGRAM_OWNER_ID")
     store = get_pairing_store()
 
     if owner_id:
-        store.force_pair_owner("telegram", owner_id, user_handle="owner")
-        print(f"Paired owner Telegram ID (from env): {owner_id}")
+        owner = store.lookup("telegram", owner_id)
+        if owner is not None and owner.trust_level == "owner_paired":
+            print(f"Using pre-bootstrapped owner Telegram ID: {owner_id}")
+        else:
+            print(f"\n[live_poll] TELEGRAM_OWNER_ID {owner_id!r} is not paired as owner.")
+            print(f"Run: uv run python scripts/bootstrap_owner.py telegram {owner_id}")
+            print("Messages will remain untrusted until setup is completed.")
     else:
-        print("\n[live_poll] No TELEGRAM_OWNER_ID set. Will auto-pair the first user who messages the bot!")
+        print("\n[live_poll] No TELEGRAM_OWNER_ID set. Messages will remain untrusted.")
+        print("Set TELEGRAM_OWNER_ID, then run the installer bootstrap command.")
 
     # 2. Get Gateway connection details
     gateway_port = int(os.getenv("GLC_PORT", "8111"))
-    install_token = get_or_create_install_token()
+    install_token = require_install_token_from_env()
 
     # Instantiate the adapter
     adapter = Adapter()
@@ -69,7 +75,7 @@ async def main() -> None:
         offset = 0
 
         async def poll_telegram() -> None:
-            nonlocal offset, owner_id
+            nonlocal offset
             async with httpx.AsyncClient() as client:
                 while True:
                     try:
@@ -80,16 +86,6 @@ async def main() -> None:
                             if data.get("ok"):
                                 for update in data["result"]:
                                     offset = update["update_id"] + 1
-                                    message = update.get("message") or {}
-                                    from_user = message.get("from") or {}
-                                    user_id = from_user.get("id") or message.get("chat", {}).get("id")
-
-                                    # Auto-pair the first sender as owner
-                                    if user_id and not owner_id:
-                                        owner_id = str(user_id)
-                                        store.force_pair_owner("telegram", owner_id, user_handle="owner")
-                                        print(f"\n*** Auto-paired user {owner_id} as the owner! ***\n")
-
                                     print(f"Received Telegram Update ID: {update['update_id']}")
 
                                     # Translate to ChannelMessage

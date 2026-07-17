@@ -15,6 +15,7 @@ import pytest
 from glc.channels.catalogue.matrix.adapter import Adapter
 from glc.channels.envelope import ChannelMessage, ChannelReply
 from glc.security.pairing import get_pairing_store
+from tests.pairing_helpers import confirm_owner
 from tests.channels.mocks.matrix_mock import OWNER_ID, STRANGER_ID, MatrixMock
 
 
@@ -26,7 +27,7 @@ def mock():
 @pytest.fixture
 def pair_owner():
     store = get_pairing_store()
-    store.force_pair_owner("matrix", OWNER_ID, user_handle="owner")
+    confirm_owner(store, "matrix", OWNER_ID)
     yield
     store.revoke("matrix", OWNER_ID)
 

@@ -87,17 +87,24 @@ that's what was actually used for the reference run.
 
 ### Step-by-step
 
-**Step 1 — start the gateway** (Terminal 1). Needed only for pairing —
+**Step 1 — create your installation token** (Terminal 1).
+Prints the raw token once; only a hash is stored on disk:
+```bash
+uv run python scripts/bootstrap_install_token.py
+# or: uv run glc token
+export GLC_INSTALL_TOKEN='<printed-token>'
+```
+If a token already exists and you need a new one:
+```bash
+uv run python scripts/bootstrap_install_token.py --rotate
+```
+
+**Step 2 — start the gateway** (Terminal 1 or 2). Needed only for pairing —
 pure localhost, no tunnel involved yet:
 ```bash
 uv run glc serve
 ```
 ![glc serve](../assets/screenshots/e2e_testing/01_glc_serve.png)
-
-**Step 2 — get your installation token** (same or a second terminal):
-```bash
-uv run glc token
-```
 
 **Step 3 — pair your phone as owner, part 1: request a code.** The
 pairing DB is sqlite at `~/.glc/pairings.sqlite` and survives restarts,
@@ -106,7 +113,7 @@ call — Meta/Twilio are not involved in pairing at all, so no tunnel is
 needed:
 ```bash
 curl -X POST http://localhost:8111/v1/control/pair \
-  -H "Authorization: Bearer <token-from-glc-token>" \
+  -H "Authorization: Bearer $GLC_INSTALL_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"channel":"whatsapp","channel_user_id":"91XXXXXXXXXX","user_handle":"owner","trust_level":"owner_paired"}'
 ```
@@ -120,7 +127,7 @@ no `+` (e.g. `91XXXXXXXXXX`) — the same format Meta/Twilio put in the
 (valid 5 minutes):
 ```bash
 curl -X POST http://localhost:8111/v1/control/pair/confirm \
-  -H "Authorization: Bearer <token-from-glc-token>" \
+  -H "Authorization: Bearer $GLC_INSTALL_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"code":"186157"}'
 ```

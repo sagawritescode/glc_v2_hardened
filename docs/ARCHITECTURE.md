@@ -46,12 +46,15 @@ mutate the agent's own constraints.
 ## 4. The control plane has an out-of-band path
 
 `/v1/control/kill`, `/v1/control/pair`, `/v1/control/presence` are
-authenticated by a per-installation token (`~/.glc/install_token`)
-and isolated from the channel traffic. The kill endpoint binds
-127.0.0.1 by default; bypassing this requires `GLC_KILL_ALLOW_REMOTE=1`
-and a deliberate operator decision. The intent is to make "STOP"
-reachable through a phone-friendly URL the user can hit when the
-agent has gone off the rails inside the channel.
+authenticated by a per-installation token. The runtime stores only a
+SHA-256 digest of that token under `~/.glc/install_token.hash` (B4);
+adapters present the raw secret via `GLC_INSTALL_TOKEN`. Create or
+rotate with `uv run python scripts/bootstrap_install_token.py` (or
+`uv run glc token`). The kill endpoint binds 127.0.0.1 by default;
+bypassing this requires `GLC_KILL_ALLOW_REMOTE=1` and a deliberate
+operator decision. The intent is to make "STOP" reachable through a
+phone-friendly URL the user can hit when the agent has gone off the
+rails inside the channel.
 
 Lives in: `glc/routes/control.py`.
 Answers: Summer Yue having to physically reach the Mac mini.

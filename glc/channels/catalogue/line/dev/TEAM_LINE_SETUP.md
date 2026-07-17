@@ -259,11 +259,8 @@ source .env
 set +a
 export GLC_PAIRING_DB="$HOME/.glc/line-pairings.sqlite"
 
-uv run python -c 'from glc.security.pairing import get_pairing_store
-import os
-user_id = os.environ["LINE_OWNER_USER_ID"]
-get_pairing_store().force_pair_owner("line", user_id, user_handle="owner")
-print("paired line owner")'
+uv run python scripts/bootstrap_owner.py \
+  line "$LINE_OWNER_USER_ID" --handle owner
 ```
 
 Verify local trust classification:

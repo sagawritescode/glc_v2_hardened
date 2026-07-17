@@ -30,6 +30,29 @@ def test_pair_then_confirm_round_trip(app_client, install_token):
     assert c.json()["trust_level"] == "user_paired"
 
 
+def test_token_protected_owner_pairing_still_works(app_client, install_token):
+    headers = {"Authorization": f"Bearer {install_token}"}
+    pair = app_client.post(
+        "/v1/control/pair",
+        headers=headers,
+        json={
+            "channel": "telegram",
+            "channel_user_id": "owner-1",
+            "user_handle": "owner",
+            "trust_level": "owner_paired",
+        },
+    )
+    assert pair.status_code == 200
+
+    confirm = app_client.post(
+        "/v1/control/pair/confirm",
+        headers=headers,
+        json={"code": pair.json()["code"]},
+    )
+    assert confirm.status_code == 200
+    assert confirm.json()["trust_level"] == "owner_paired"
+
+
 def test_pair_confirm_bad_code_is_404(app_client, install_token):
     h = {"Authorization": f"Bearer {install_token}"}
     r = app_client.post("/v1/control/pair/confirm", headers=h, json={"code": "000000"})
