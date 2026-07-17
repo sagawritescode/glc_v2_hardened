@@ -6,6 +6,15 @@ from glc.egress.allowlist import PROVIDER_EGRESS_ALLOWLIST
 
 app = modal.App("glc-v2-gateway")
 
+# A5: reproducible image — immutable base digest + frozen uv.lock (not >= ranges).
+# Refresh intentionally: pick a new python:3.11-slim-bookworm amd64 digest,
+# run `uv lock`, bump _UV_VERSION when upgrading uv.
+_BASE_IMAGE = (
+    "python:3.11-slim-bookworm"
+    "@sha256:28255a3ace7eb4c48bc1b57b90af29e1bc82b4fd6c60614a8e3dce61b87ff941"
+)
+_UV_VERSION = "0.8.14"
+
 # A6: audit SQLite must live on the Volume (not ~/.glc ephemeral), and only
 # one container may write it — SQLite cannot safely share a Volume across
 # concurrent writers. Named constants so tests can assert without digging into
@@ -14,10 +23,8 @@ AUDIT_DB_PATH = "/data/glc/audit.sqlite"
 MAX_CONTAINERS = 1
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("fastapi>=0.110", "uvicorn[standard]>=0.27", "httpx>=0.27",
-                 "python-dotenv>=1.0", "pydantic>=2.6", "jsonschema>=4.21",
-                 "pyyaml>=6.0", "websockets>=12.0")
+    modal.Image.from_registry(_BASE_IMAGE)
+    .uv_sync(uv_project_dir=".", frozen=True, uv_version=_UV_VERSION)
     .env({
         "GLC_CONFIG_DIR": "/data/glc",
         "GLC_AUDIT_DB": AUDIT_DB_PATH,  # A6: explicit Volume-backed audit path
